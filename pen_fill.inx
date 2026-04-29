@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<inkscape-extension xmlns="http://www.inkscape.org/namespace/inkscape/extension">
+    <name>Pen Plotter Fill</name>
+    <id>org.sayedho.penfill</id>
+
+    <param name="pen_size" type="float" precision="3" min="0.05" max="20.0" gui-text="Pen size (mm):">0.5</param>
+    <param name="overlap" type="float" precision="2" min="0.5" max="2.0" gui-text="Overlap factor (1.0 = lines just touch, &lt;1 denser, &gt;1 gaps):">1.0</param>
+    <param name="max_copies" type="int" min="0" max="100000" gui-text="Number of copies (use +/- to adjust; 0 = until shape collapses):">0</param>
+    <param name="fill_mode" type="optiongroup" appearance="combo" gui-text="Fill mode:">
+        <option value="concentric">Concentric loops (separate closed paths)</option>
+        <option value="spiral">Spiral (one continuous path, fewer pen lifts)</option>
+    </param>
+    <param name="group" type="bool" gui-text="Group inset paths">true</param>
+    <param name="keep_original" type="bool" gui-text="Keep original shape">true</param>
+
+    <effect>
+        <object-type>path</object-type>
+        <effects-menu>
+            <submenu name="Generate from Path"/>
+        </effects-menu>
+    </effect>
+
+    <script>
+        <command location="inx" interpreter="python">pen_fill.py</command>
+    </script>
+</inkscape-extension>
