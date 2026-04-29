@@ -10,6 +10,8 @@ An Inkscape extension that turns closed shapes into solid fills for **pen plotte
 
 Pure-Python, **no `pip install` step**, no compiled libraries — drop the two files into Inkscape's extensions folder and you're done.
 
+![Concentric and spiral fill demo](images/hero.svg)
+
 ---
 
 ## Features
@@ -50,6 +52,18 @@ That's it — no pip install, no compilation.
 5. Apply.
 
 The result is added to your document as a new path (or a group of paths) with the stroke width set to your pen size for a faithful preview of the plotted output.
+
+### Pen size controls fill density
+
+Smaller pens produce more inset copies and therefore denser coverage:
+
+![Same shape filled at three pen sizes](images/pen-sizes.svg)
+
+### Works on complex curves
+
+Calligraphy strokes, organic shapes, and concave regions are handled by iteratively pruning vertices that overshoot during the offset, so the chain keeps going through sharp corners instead of giving up:
+
+![Calligraphy stroke before and after fill](images/calligraphy.svg)
 
 ---
 
