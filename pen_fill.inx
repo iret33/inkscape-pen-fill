@@ -3,20 +3,67 @@
     <name>Pen Plotter Fill</name>
     <id>org.sayedho.penfill</id>
 
-    <param name="pen_size" type="float" precision="3" min="0.05" max="20.0" gui-text="Pen size (mm):">0.5</param>
-    <param name="overlap" type="float" precision="2" min="0.5" max="2.0" gui-text="Overlap factor (1.0 = lines just touch, &lt;1 denser, &gt;1 gaps):">1.0</param>
-    <param name="max_copies" type="int" min="0" max="100000" gui-text="Number of copies (use +/- to adjust; 0 = until shape collapses):">0</param>
-    <param name="fill_mode" type="optiongroup" appearance="combo" gui-text="Fill mode:">
-        <option value="concentric">Concentric loops (separate closed paths)</option>
-        <option value="spiral">Spiral (one continuous path, fewer pen lifts)</option>
+    <param name="tab" type="notebook">
+        <page name="fill" gui-text="Fill">
+            <param name="fill_mode" type="optiongroup" appearance="combo" gui-text="Fill style:">
+                <option value="concentric">Concentric rings</option>
+                <option value="spiral">Spiral (continuous rings, fewest pen lifts)</option>
+                <option value="archimedean">Round spiral (Archimedean)</option>
+                <option value="hatch">Straight lines (hatch)</option>
+                <option value="crosshatch">Cross-hatch</option>
+                <option value="sine">Waves (sine hatch)</option>
+                <option value="hilbert">Hilbert maze (space-filling curve)</option>
+            </param>
+            <param name="pen_size" type="float" precision="3" min="0.05" max="20.0" gui-text="Pen width (mm):">0.5</param>
+            <param name="spacing_factor" type="float" precision="2" min="0.5" max="20.0" gui-text="Line spacing (× pen width):"
+                   gui-description="1.0 = strokes just touch for solid coverage; larger values leave visible gaps for shading.">1.0</param>
+            <param name="angle" type="float" precision="1" min="-180.0" max="180.0" gui-text="Hatch angle (°):"
+                   gui-description="Direction of hatch / wave lines. Ignored by ring and spiral styles.">45.0</param>
+            <param name="connect" type="bool" gui-text="Connect neighbouring lines (serpentine)"
+                   gui-description="Join hatch rows into long continuous strokes — far fewer pen lifts.">true</param>
+            <param name="keep_inside" type="bool" gui-text="Keep ink inside the outline"
+                   gui-description="Insets the fill by half a pen width so the wet line stays inside the shape edge.">true</param>
+            <param name="density_from_fill" type="bool" gui-text="Line density from shape fill colour"
+                   gui-description="Darker-filled shapes get denser lines (spacing ÷ darkness). Fill many shapes at once to build tonal art.">false</param>
+        </page>
+        <page name="modes" gui-text="Style options">
+            <label appearance="header">Cross-hatch</label>
+            <param name="cross_angle" type="float" precision="1" min="5.0" max="175.0" gui-text="Angle between the two passes (°):">90.0</param>
+            <label appearance="header">Waves</label>
+            <param name="sine_amplitude" type="float" precision="2" min="0.05" max="50.0" gui-text="Wave height (mm):">1.5</param>
+            <param name="sine_wavelength" type="float" precision="2" min="0.5" max="200.0" gui-text="Wave length (mm):">6.0</param>
+        </page>
+        <page name="output" gui-text="Output">
+            <param name="color_mode" type="optiongroup" appearance="combo" gui-text="Stroke colour:">
+                <option value="black">Black</option>
+                <option value="shape">Take from shape (fill colour)</option>
+                <option value="custom">Custom</option>
+            </param>
+            <param name="custom_color" type="color" appearance="colorbutton" gui-text="Custom colour:">255</param>
+            <param name="group" type="bool" gui-text="Group the generated fill">true</param>
+            <param name="keep_original" type="bool" gui-text="Keep the original shape">true</param>
+        </page>
+        <page name="plot" gui-text="Plot">
+            <param name="optimize" type="bool" gui-text="Optimize plotting order"
+                   gui-description="Re-orders strokes nearest-first and merges touching ones, cutting pen-up travel dramatically.">true</param>
+            <param name="join_tolerance" type="float" precision="2" min="0.0" max="5.0" gui-text="Join strokes closer than (mm):"
+                   gui-description="Endpoints within this distance are drawn as one continuous stroke (no pen lift).">0.05</param>
+            <param name="show_stats" type="bool" gui-text="Show plot statistics when done">false</param>
+        </page>
+        <page name="help" gui-text="Help">
+            <label appearance="header">Pen Plotter Fill v2</label>
+            <label>Select closed shapes (paths, rectangles, ellipses, stars — or groups of them) and apply. Each shape becomes pen strokes that fill it, spaced by your pen width.</label>
+            <label>Holes are respected: a donut or the letter O fills correctly. Shapes that pinch in the middle split cleanly.</label>
+            <label>Spiral gives the fewest pen lifts. Hatch with serpentine connection is the fastest to plot. Set spacing above 1.0 for lighter tone.</label>
+            <label>Preview tip: the stroke width shown equals your real pen width, so what you see is what plots.</label>
+            <label appearance="url">https://github.com/iret33/inkscape-pen-fill</label>
+        </page>
     </param>
-    <param name="group" type="bool" gui-text="Group inset paths">true</param>
-    <param name="keep_original" type="bool" gui-text="Keep original shape">true</param>
 
     <effect>
-        <object-type>path</object-type>
+        <object-type>all</object-type>
         <effects-menu>
-            <submenu name="Generate from Path"/>
+            <submenu name="Pen Plotter"/>
         </effects-menu>
     </effect>
 
