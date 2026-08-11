@@ -4,7 +4,7 @@
 [![Inkscape 1.x](https://img.shields.io/badge/Inkscape-1.x-orange.svg)](https://inkscape.org)
 [![Python 3.8+](https://img.shields.io/badge/Python-3.8%2B-blue.svg)](https://www.python.org)
 [![No dependencies](https://img.shields.io/badge/dependencies-none-brightgreen.svg)](#installation)
-[![Tests](https://github.com/iret33/inkscape-pen-fill/actions/workflows/test.yml/badge.svg)](https://github.com/iret33/inkscape-pen-fill/actions)
+[![Tests](https://github.com/iret33/inkscape-pen-fill/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/iret33/inkscape-pen-fill/actions/workflows/test.yml?query=branch%3Amain)
 
 An Inkscape extension that turns closed shapes into **plotter-ready pen fills**. Pick a pen width, pick a fill style, apply — the shape becomes strokes your plotter can actually draw, spaced exactly one pen line apart.
 
