@@ -1,0 +1,38 @@
+name: tests
+
+on:
+  push:
+    branches: [main, v2]
+  pull_request:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install inkex (headless — skip PyGObject GUI deps)
+        run: |
+          pip install --no-deps inkex
+          pip install lxml numpy cssselect tinycss2 packaging pytest
+      - name: Run tests
+        run: pytest -q
+
+  pure-python:
+    # the geometry core must also pass without numpy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install test deps only
+        run: pip install pytest
+      - name: Core tests without numpy / inkex
+        run: pytest tests/test_core.py -q
