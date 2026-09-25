@@ -79,9 +79,13 @@ def fill_to_d(region, mode, pen, spacing, **kw):
                                  fit_tol=max(pen * 0.08, 0.02))
 
 
+def lifts(region, mode, pen, spacing, **kw):
+    res = core.generate_fill(region, mode, pen, spacing, **kw)
+    return core.optimize_order(res.chains, join_tol=pen * 0.1)[2][2]
+
+
 def outline_d(region):
-    return core.chains_to_path_d(
-        region.rings, closed_flags=[True] * len(region.rings))
+    return core.chains_to_path_d([r + [r[0]] for r in region.rings])
 
 
 def bbox_of(rings):
@@ -227,23 +231,19 @@ def make_serpentine():
     bb = bbox_of([shape])
     pen, sp = 1.15, 1.5
 
-    loose = core.hatch_fill(region, sp, 45.0, edge_gap=pen / 2,
-                            connect=False)
-    tight = core.hatch_fill(region, sp, 45.0, edge_gap=pen / 2,
-                            connect=True)
-    loose_o, _, ls = core.optimize_order(loose)
-    tight_o, _, ts = core.optimize_order(tight)
-
-    d_loose = core.chains_to_path_d(loose_o)
-    d_tight = core.chains_to_path_d(tight_o)
+    kw = dict(angle=45.0)
+    d_loose = fill_to_d(region, "hatch", pen, sp, connect=False, **kw)
+    d_tight = fill_to_d(region, "hatch", pen, sp, connect=True, **kw)
 
     pw, ph, pad = 280, 220, 18
     body = [
         panel(pad, pad, pw, ph,
-              "separate lines — {} pen lifts".format(ls[2]),
+              "separate lines — {} pen lifts".format(
+                  lifts(region, "hatch", pen, sp, connect=False, **kw)),
               centred(d_loose, "ink", bb, pw, ph, ' stroke-width="0.7"')),
         panel(pad * 2 + pw, pad, pw, ph,
-              "serpentine connected — {} pen lifts".format(ts[2]),
+              "joined into long strokes — {} pen lifts".format(
+                  lifts(region, "hatch", pen, sp, connect=True, **kw)),
               centred(d_tight, "ink2", bb, pw, ph, ' stroke-width="0.7"')),
     ]
     return build_svg(pw * 2 + pad * 3, ph + 60, "".join(body))
@@ -308,6 +308,26 @@ def make_calligraphy():
     return build_svg(pw * 2 + pad * 3, ph + 60, "".join(body))
 
 
+def make_outline():
+    """v2.1: the optional outline pass gives hatch fills a crisp edge."""
+    shape = heart()
+    region = core.Region([shape])
+    bb = bbox_of([shape])
+    pen, sp = 1.05, 1.9
+    kw = dict(angle=45.0)
+    pw, ph, pad = 250, 210, 18
+    body = [
+        panel(pad, pad, pw, ph, "Hatch",
+              centred(fill_to_d(region, "hatch", pen, sp, **kw), "ink", bb,
+                      pw, ph, ' stroke-width="0.62"')),
+        panel(pad * 2 + pw, pad, pw, ph, "Hatch + outline",
+              centred(fill_to_d(region, "hatch", pen, sp, outline=True,
+                                **kw), "ink", bb, pw, ph,
+                      ' stroke-width="0.62"')),
+    ]
+    return build_svg(pw * 2 + pad * 3, ph + 60, "".join(body))
+
+
 if __name__ == "__main__":
     write("hero.svg", make_hero())
     write("holes.svg", make_holes())
@@ -315,3 +335,4 @@ if __name__ == "__main__":
     write("density.svg", make_density())
     write("pen-sizes.svg", make_pen_sizes())
     write("calligraphy.svg", make_calligraphy())
+    write("outline.svg", make_outline())
