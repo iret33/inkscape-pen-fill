@@ -16,8 +16,10 @@ Contents
                   with optional serpentine connection of neighbouring rows
                   into long continuous strokes (fewer pen lifts).
 * DistanceField — sampled signed distance to the region boundary
-                  (scanline mask + exact near-boundary band + 5x7x11
+                  (scanline mask + exact near-boundary band + 5x5
                   chamfer transform; numpy-accelerated when available).
+                  Its iso-contours give true lateral insets (keep ink
+                  inside, outline pass).
 * Marching squares contour extraction → robust concentric fills that
   survive holes, splits at narrow waists, and merges — where a naive
   polygon inset gives up.
@@ -40,7 +42,7 @@ try:
 except ImportError:          # pragma: no cover - numpy ships with Inkscape
     _np = None
 
-__version__ = "2.0.0"
+__version__ = "2.1.0"
 
 EPS = 1e-9
 INF = float("inf")
@@ -85,59 +87,22 @@ def rotate_points(pts, angle_rad):
     return [(x * c - y * s, x * s + y * c) for x, y in pts]
 
 
-def shorten_polyline(pts, trim_start, trim_end):
-    """Cut `trim_start` / `trim_end` of arc length off the ends of an open
-    polyline. Returns [] if nothing is left."""
-    if trim_start <= 0 and trim_end <= 0:
-        return list(pts)
-    total = polyline_length(pts)
-    if total <= trim_start + trim_end + EPS:
-        return []
-
-    def walk(points, trim):
-        if trim <= 0:
-            return list(points)
-        out = []
-        remaining = trim
-        i = 0
-        while i < len(points) - 1:
-            seg = _dist(points[i], points[i + 1])
-            if seg > remaining:
-                t = remaining / seg
-                x = points[i][0] + (points[i + 1][0] - points[i][0]) * t
-                y = points[i][1] + (points[i + 1][1] - points[i][1]) * t
-                out.append((x, y))
-                out.extend(points[i + 1:])
-                return out
-            remaining -= seg
-            i += 1
-        return []
-
-    pts = walk(pts, trim_start)
-    if not pts:
-        return []
-    pts = walk(list(reversed(pts)), trim_end)
-    return list(reversed(pts)) if pts else []
-
-
-def _resample_dense(pts, closed, max_step):
-    """Insert points so no segment is longer than max_step."""
-    if len(pts) < 2:
-        return list(pts)
-    src = list(pts) + ([pts[0]] if closed else [])
-    out = [src[0]]
-    for i in range(len(src) - 1):
-        a, b = src[i], src[i + 1]
-        seg = _dist(a, b)
-        if seg > max_step:
-            n = int(math.ceil(seg / max_step))
-            for k in range(1, n):
-                t = k / n
-                out.append((a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t))
-        out.append(b)
-    if closed:
-        out.pop()
-    return out
+def _dist_to_loop(p, loop):
+    """Distance from point p to a closed polyline."""
+    best = INF
+    px, py = p
+    n = len(loop)
+    for i in range(n):
+        ax, ay = loop[i]
+        bx, by = loop[(i + 1) % n]
+        dx, dy = bx - ax, by - ay
+        seg2 = dx * dx + dy * dy
+        t = 0.0 if seg2 < EPS else ((px - ax) * dx + (py - ay) * dy) / seg2
+        t = 0.0 if t < 0 else (1.0 if t > 1 else t)
+        d = math.hypot(px - ax - t * dx, py - ay - t * dy)
+        if d < best:
+            best = d
+    return best
 
 
 def simplify_polyline(pts, tol, closed=False):
@@ -205,6 +170,7 @@ class Region:
             self.ymin, self.ymax = min(ys), max(ys)
         else:
             self.xmin = self.xmax = self.ymin = self.ymax = 0.0
+        self._rows = None            # edge index, built on first scanline
 
     def is_empty(self):
         return not self.rings
@@ -215,24 +181,43 @@ class Region:
 
     # -- scanline machinery ------------------------------------------------
 
+    def _edge_rows(self):
+        """Bucket the non-horizontal edges by y, so a scanline only tests
+        the few edges that can reach it instead of every edge."""
+        if self._rows is None:
+            edges = []
+            for ring in self.rings:
+                n = len(ring)
+                for i in range(n):
+                    x1, y1 = ring[i]
+                    x2, y2 = ring[(i + 1) % n]
+                    if y1 != y2:
+                        edges.append((x1, y1, x2, y2))
+            nb = max(1, min(len(edges), 4096))
+            self._row_h = max(self.ymax - self.ymin, EPS) / nb
+            self._rows = [[] for _ in range(nb)]
+            for e in edges:
+                for b in range(self._row(min(e[1], e[3])),
+                               self._row(max(e[1], e[3])) + 1):
+                    self._rows[b].append(e)
+        return self._rows
+
+    def _row(self, y):
+        b = int((y - self.ymin) / self._row_h)
+        return 0 if b < 0 else min(b, len(self._rows) - 1)
+
     def crossings(self, y):
         """All edge crossings of the horizontal line at `y`, as a list of
         (x, direction) with direction +1 for upward edges, -1 for downward.
         Uses the half-open rule [ymin, ymax) so vertices count once."""
+        if not self.rings or y < self.ymin or y >= self.ymax:
+            return []
         out = []
-        for ring in self.rings:
-            n = len(ring)
-            for i in range(n):
-                x1, y1 = ring[i]
-                x2, y2 = ring[(i + 1) % n]
-                if y1 == y2:
-                    continue
-                if (y1 <= y < y2):
-                    t = (y - y1) / (y2 - y1)
-                    out.append((x1 + t * (x2 - x1), 1))
-                elif (y2 <= y < y1):
-                    t = (y - y1) / (y2 - y1)
-                    out.append((x1 + t * (x2 - x1), -1))
+        for x1, y1, x2, y2 in self._edge_rows()[self._row(y)]:
+            if y1 <= y < y2:
+                out.append((x1 + (y - y1) / (y2 - y1) * (x2 - x1), 1))
+            elif y2 <= y < y1:
+                out.append((x1 + (y - y1) / (y2 - y1) * (x2 - x1), -1))
         out.sort(key=lambda c: c[0])
         return out
 
@@ -271,6 +256,35 @@ class Region:
                                  a[1] + (b[1] - a[1]) * t):
                 return False
         return True
+
+    def on_boundary(self, a, b):
+        """False when the edge piece a-b has filled area on BOTH sides —
+        e.g. where two overlapping subpaths merge under the nonzero rule,
+        or two subpaths share an edge. Such edges draw nothing, so they
+        must not count as the shape's outline."""
+        dx, dy = b[0] - a[0], b[1] - a[1]
+        length = math.hypot(dx, dy)
+        if length < EPS:
+            return True
+        off = max(length * 0.05, 1e-6)
+        mx, my = (a[0] + b[0]) * 0.5, (a[1] + b[1]) * 0.5
+        if abs(dy) < abs(dx) * 0.05:
+            # near-horizontal: probe a hair above and below the midpoint
+            return not (self.contains(mx, my - off)
+                        and self.contains(mx, my + off))
+        # otherwise the scanline through the midpoint crosses the piece
+        # right there: one pass gives the winding just left and right
+        count_l = count_r = wind_l = wind_r = 0
+        for cx, d in self.crossings(my):
+            if cx > mx - off:
+                count_l += 1
+                wind_l += d
+                if cx > mx + off:
+                    count_r += 1
+                    wind_r += d
+        if self.fill_rule == "evenodd":
+            return not (count_l % 2 and count_r % 2)
+        return not (wind_l and wind_r)
 
 
 # ----------------------------------------------------------------------
@@ -329,63 +343,62 @@ def _scanline_ys(ymin, ymax, spacing):
     return out
 
 
-def _serpentine_connect(rows, region, max_bridge):
+def _serpentine_connect(rows, bridge_ok, max_bridge):
     """Connect per-row polylines into serpentine chains.
 
     `rows` is a list (in scan order) of lists of open polylines whose
     endpoints sit on that row. Consecutive rows are joined when a straight
-    bridge between endpoints is short enough and stays inside the region.
-    Returns a flat list of polylines.
+    bridge between endpoints is short enough and `bridge_ok(a, b)` accepts
+    it (i.e. it stays inside the shape). Returns a flat list of polylines.
     """
-    unused = [[True] * len(row) for row in rows]
+    free = [[True] * len(row) for row in rows]
     chains = []
-
-    for i0 in range(len(rows)):
-        for j0 in range(len(rows[i0])):
-            if not unused[i0][j0]:
+    for i0, row0 in enumerate(rows):
+        for j0, seg0 in enumerate(row0):
+            if not free[i0][j0]:
                 continue
-            unused[i0][j0] = False
-            chain = list(rows[i0][j0])
-            row = i0 + 1
-            while row < len(rows):
-                end = chain[-1]
-                best = None      # (dist, idx, reversed)
-                for j, ok in enumerate(unused[row]):
-                    if not ok:
-                        continue
-                    seg = rows[row][j]
-                    d_start = _dist(end, seg[0])
-                    d_end = _dist(end, seg[-1])
-                    if d_start <= d_end:
-                        cand = (d_start, j, False)
-                    else:
-                        cand = (d_end, j, True)
-                    if cand[0] <= max_bridge and (best is None or cand[0] < best[0]):
-                        best = cand
-                if best is None:
+            free[i0][j0] = False
+            chain = list(seg0)
+            for i in range(i0 + 1, len(rows)):
+                step = _next_segment(rows[i], free[i], chain[-1],
+                                     bridge_ok, max_bridge)
+                if step is None:
                     break
-                _, j, rev = best
-                seg = rows[row][j]
-                entry = seg[-1] if rev else seg[0]
-                if not region.segment_inside(end, entry):
-                    break
-                unused[row][j] = False
-                chain.extend(reversed(seg) if rev else seg)
-                row += 1
+                j, seg = step
+                free[i][j] = False
+                chain.extend(seg)
             chains.append(chain)
-
     return chains
 
 
-def hatch_fill(region, spacing, angle_deg, edge_gap=0.0,
-               connect=False, connect_factor=3.0, min_len=1e-4):
+def _next_segment(row, free, end, bridge_ok, max_bridge):
+    """Nearest free segment of `row` that a good bridge from `end` reaches,
+    oriented to start at the bridge: (index, points), or None."""
+    options = []
+    for j, seg in enumerate(row):
+        if free[j]:
+            options.append((_dist(end, seg[0]), j, seg))
+            options.append((_dist(end, seg[-1]), j, seg[::-1]))
+    options.sort(key=lambda o: o[0])
+    for gap, j, seg in options:
+        if gap > max_bridge:
+            break
+        if bridge_ok(end, seg[0]):
+            return j, seg
+    return None
+
+
+def hatch_fill(region, spacing, angle_deg, connect=False, bridge_ok=None,
+               connect_factor=3.0, min_len=1e-4):
     """Parallel straight-line fill.
 
     spacing   — distance between lines (user units)
     angle_deg — line direction, 0 = horizontal
-    edge_gap  — shorten each line end by this much (keeps ink inside)
     connect   — serpentine-join neighbouring lines into long chains
-    Returns list of open polylines in world coordinates.
+    bridge_ok — optional test for joining bridges (default: stays inside
+                `region`)
+    Returns list of open polylines in world coordinates. To keep ink off
+    the outline, pass an inset region (see generate_fill).
     """
     if region.is_empty() or spacing <= 0:
         return []
@@ -394,71 +407,56 @@ def hatch_fill(region, spacing, angle_deg, edge_gap=0.0,
 
     rows = []
     for y in _scanline_ys(rot.ymin, rot.ymax, spacing):
-        row = []
-        for x0, x1 in rot.intervals(y):
-            x0 += edge_gap
-            x1 -= edge_gap
-            if x1 - x0 >= max(min_len, EPS):
-                row.append([(x0, y), (x1, y)])
-        rows.append(row)
+        rows.append([[(x0, y), (x1, y)] for x0, x1 in rot.intervals(y)
+                     if x1 - x0 >= max(min_len, EPS)])
 
+    return _finish_rows(rows, theta, region, connect, bridge_ok,
+                        spacing * connect_factor)
+
+
+def _finish_rows(rows, theta, region, connect, bridge_ok, max_bridge):
+    """Rotate scan rows back to world space; optionally serpentine-join."""
+    rows = [[rotate_points(seg, theta) for seg in row] for row in rows]
     if connect:
-        chains = _serpentine_connect(rows, rot, spacing * connect_factor)
-    else:
-        chains = [seg for row in rows for seg in row]
-
-    return [rotate_points(c, theta) for c in chains]
+        return _serpentine_connect(rows, bridge_ok or region.segment_inside,
+                                   max_bridge)
+    return [seg for row in rows for seg in row]
 
 
 def cross_hatch_fill(region, spacing, angle_deg, cross_angle_deg=90.0,
-                     edge_gap=0.0, connect=False):
+                     connect=False, bridge_ok=None):
     """Two hatch passes: angle and angle+cross_angle."""
-    first = hatch_fill(region, spacing, angle_deg, edge_gap, connect)
-    second = hatch_fill(region, spacing, angle_deg + cross_angle_deg,
-                        edge_gap, connect)
-    return first + second
+    return (hatch_fill(region, spacing, angle_deg, connect, bridge_ok)
+            + hatch_fill(region, spacing, angle_deg + cross_angle_deg,
+                         connect, bridge_ok))
 
 
 def sine_fill(region, spacing, angle_deg, amplitude, wavelength,
-              edge_gap=0.0, connect=False, connect_factor=3.0):
+              connect=False, bridge_ok=None, connect_factor=3.0):
     """Sine-wave hatch: each scan row is a sine stroke clipped to the shape.
-    Rows alternate phase by half a period so neighbouring waves interlock."""
+    All rows share one phase, so neighbouring waves run parallel and never
+    cross (crossing rows would double-ink the paper), whatever the height."""
     if region.is_empty() or spacing <= 0 or wavelength <= 0:
         return []
     theta = math.radians(angle_deg)
     rot = region.rotated(-theta)
-    inside = rot.contains
 
     sample = max(wavelength / 24.0, 1e-3)
     x_start = rot.xmin - wavelength
     x_end = rot.xmax + wavelength
     n = max(2, int(math.ceil((x_end - x_start) / sample)))
+    xs = [x_start + (x_end - x_start) * k / n for k in range(n + 1)]
+    offsets = [amplitude * math.sin(2 * math.pi * x / wavelength) for x in xs]
 
     rows = []
-    for i, y in enumerate(_scanline_ys(rot.ymin - amplitude,
-                                       rot.ymax + amplitude, spacing)):
-        phase = math.pi * (i % 2)
-        wave = []
-        for k in range(n + 1):
-            x = x_start + (x_end - x_start) * k / n
-            wave.append((x, y + amplitude *
-                         math.sin(2 * math.pi * x / wavelength + phase)))
-        runs = clip_polyline(wave, inside)
-        row = []
-        for run in runs:
-            run = shorten_polyline(run, edge_gap, edge_gap)
-            if len(run) >= 2:
-                row.append(run)
-        rows.append(row)
+    for y in _scanline_ys(rot.ymin - amplitude, rot.ymax + amplitude,
+                          spacing):
+        wave = [(x, y + dy) for x, dy in zip(xs, offsets)]
+        rows.append(clip_polyline(wave, rot.contains))
 
-    if connect:
-        # wave crests swing endpoints up to ±amplitude, so allow for it
-        chains = _serpentine_connect(
-            rows, rot, spacing * connect_factor + 2 * amplitude)
-    else:
-        chains = [r for row in rows for r in row]
-
-    return [rotate_points(c, theta) for c in chains]
+    # wave crests swing endpoints up to ±amplitude, so allow for it
+    return _finish_rows(rows, theta, region, connect, bridge_ok,
+                        spacing * connect_factor + 2 * amplitude)
 
 
 # ----------------------------------------------------------------------
@@ -541,6 +539,26 @@ class DistanceField:
         return mask
 
     @staticmethod
+    def _boundary_pieces(region, cell):
+        """The outline as short pieces (at most one cell long), leaving out
+        pieces with filled area on both sides — they are not part of the
+        visible outline (overlapping subpaths under nonzero, shared edges)."""
+        for ring in region.rings:
+            n = len(ring)
+            for k in range(n):
+                a = ring[k]
+                b = ring[(k + 1) % n]
+                count = max(1, int(math.ceil(_dist(a, b) / cell)))
+                prev = a
+                for s in range(1, count + 1):
+                    t = s / count
+                    cur = (a[0] + (b[0] - a[0]) * t,
+                           a[1] + (b[1] - a[1]) * t)
+                    if region.on_boundary(prev, cur):
+                        yield prev, cur
+                    prev = cur
+
+    @staticmethod
     def _build_band(region, x0, y0, nx, ny, cell):
         """Exact point-to-edge distances for cells within ~2 cells of the
         boundary; INF elsewhere."""
@@ -549,41 +567,37 @@ class DistanceField:
         else:
             seed = [INF] * (nx * ny)
         reach = 2
-        for ring in region.rings:
-            n = len(ring)
-            for k in range(n):
-                ax, ay = ring[k]
-                bx, by = ring[(k + 1) % n]
-                i_lo = int((min(ax, bx) - x0) / cell) - reach
-                i_hi = int((max(ax, bx) - x0) / cell) + reach
-                j_lo = int((min(ay, by) - y0) / cell) - reach
-                j_hi = int((max(ay, by) - y0) / cell) + reach
-                if i_lo < 0:
-                    i_lo = 0
-                if j_lo < 0:
-                    j_lo = 0
-                if i_hi > nx - 1:
-                    i_hi = nx - 1
-                if j_hi > ny - 1:
-                    j_hi = ny - 1
-                ex, ey = bx - ax, by - ay
-                ee = ex * ex + ey * ey
-                for j in range(j_lo, j_hi + 1):
-                    py = y0 + j * cell
-                    base = j * nx
-                    for i in range(i_lo, i_hi + 1):
-                        px = x0 + i * cell
-                        if ee < EPS:
-                            dx, dy = px - ax, py - ay
-                        else:
-                            t = ((px - ax) * ex + (py - ay) * ey) / ee
-                            t = 0.0 if t < 0 else (1.0 if t > 1 else t)
-                            dx = px - (ax + t * ex)
-                            dy = py - (ay + t * ey)
-                        d = math.hypot(dx, dy)
-                        idx = base + i
-                        if d < seed[idx]:
-                            seed[idx] = d
+        for (ax, ay), (bx, by) in DistanceField._boundary_pieces(region, cell):
+            i_lo = int((min(ax, bx) - x0) / cell) - reach
+            i_hi = int((max(ax, bx) - x0) / cell) + reach
+            j_lo = int((min(ay, by) - y0) / cell) - reach
+            j_hi = int((max(ay, by) - y0) / cell) + reach
+            if i_lo < 0:
+                i_lo = 0
+            if j_lo < 0:
+                j_lo = 0
+            if i_hi > nx - 1:
+                i_hi = nx - 1
+            if j_hi > ny - 1:
+                j_hi = ny - 1
+            ex, ey = bx - ax, by - ay
+            ee = ex * ex + ey * ey
+            for j in range(j_lo, j_hi + 1):
+                py = y0 + j * cell
+                base = j * nx
+                for i in range(i_lo, i_hi + 1):
+                    px = x0 + i * cell
+                    if ee < EPS:
+                        dx, dy = px - ax, py - ay
+                    else:
+                        t = ((px - ax) * ex + (py - ay) * ey) / ee
+                        t = 0.0 if t < 0 else (1.0 if t > 1 else t)
+                        dx = px - (ax + t * ex)
+                        dy = py - (ay + t * ey)
+                    d = math.hypot(dx, dy)
+                    idx = base + i
+                    if d < seed[idx]:
+                        seed[idx] = d
         return seed
 
     # -- chamfer propagation ----------------------------------------------
@@ -739,6 +753,24 @@ class DistanceField:
 
     def max_value(self):
         return self.max_point()[2]
+
+    def inset(self, depth):
+        """The shape shrunk inward by `depth` — a true lateral inset (the
+        field's iso-contour) — or None when nothing is left."""
+        cells = _cells_crossing(self, [depth])[0]
+        loops = [simplify_polyline(loop, self.cell * 0.2, closed=True)
+                 for loop in marching_squares(self, depth, cells)]
+        loops = [loop for loop in loops if len(loop) >= 3]
+        return Region(loops, "evenodd") if loops else None
+
+    def segment_deeper(self, a, b, depth, samples=5):
+        """True if sampled points of segment a-b all lie >= depth inside."""
+        for k in range(1, samples + 1):
+            t = k / (samples + 1)
+            if self.sample(a[0] + (b[0] - a[0]) * t,
+                           a[1] + (b[1] - a[1]) * t) < depth:
+                return False
+        return True
 
 
 # ----------------------------------------------------------------------
@@ -983,84 +1015,53 @@ def concentric_rings(df, spacing, start, min_perimeter=0.0, simplify_tol=None):
     return levels
 
 
-def _point_in_poly(poly, x, y):
-    inside = False
-    n = len(poly)
-    for i in range(n):
-        x1, y1 = poly[i]
-        x2, y2 = poly[(i + 1) % n]
-        if (y1 <= y < y2) or (y2 <= y < y1):
-            t = (y - y1) / (y2 - y1)
-            if x1 + t * (x2 - x1) > x:
-                inside = not inside
-    return inside
-
-
 def link_rings_spiral(levels, region):
     """Link nested concentric rings into continuous spiral chains.
 
-    Rings at level k+1 attach to the ring at level k that contains them.
-    The first child continues the parent's chain via a short bridge; other
-    children (splits at narrow waists) start fresh chains.
+    Each ring at level k+1 hangs under the NEAREST ring at level k (the
+    ring it was offset from — for a donut, rings around the hole follow
+    the hole, not the outer edge). A chain walks a ring, then steps into
+    its nearest unvisited child; other children (splits at narrow waists)
+    start fresh chains. Every ring ends up in exactly one chain.
     Returns a list of open polylines.
     """
-    if not levels:
-        return []
-
     children = [[[] for _ in lvl] for lvl in levels]
     for k in range(1, len(levels)):
-        for ci, child in enumerate(levels[k]):
-            cx, cy = child[0]
-            parent = None
-            for pi, cand in enumerate(levels[k - 1]):
-                if _point_in_poly(cand, cx, cy):
-                    parent = pi
-                    break
-            if parent is not None:
-                children[k - 1][parent].append(ci)
+        outer = levels[k - 1]
+        for ci, ring in enumerate(levels[k]):
+            parent = min(range(len(outer)),
+                         key=lambda pi: _dist_to_loop(ring[0], outer[pi]))
+            children[k - 1][parent].append(ci)
 
-    chains = []
     visited = [[False] * len(lvl) for lvl in levels]
-    seeds = [(0, i) for i in range(len(levels[0]) - 1, -1, -1)]
-
-    while seeds:
-        k, idx = seeds.pop()
-        if visited[k][idx]:
-            continue
-        chain = []
-        entry = levels[k][idx][0]
-        # descend outer→inner, always continuing into the first unvisited
-        # child; siblings become fresh seeds (their own chains)
-        while True:
-            visited[k][idx] = True
-            ring = levels[k][idx]
-            s = min(range(len(ring)),
-                    key=lambda t: (ring[t][0] - entry[0]) ** 2
-                                + (ring[t][1] - entry[1]) ** 2)
-            walk_pts = ring[s:] + ring[:s]
-            walk_pts.append(walk_pts[0])
-            if chain and not region.segment_inside(chain[-1], walk_pts[0], 3):
-                chains.append(chain)
-                chain = []
-            chain.extend(walk_pts)
-            kids = []
-            if k + 1 < len(levels):
-                kids = [ci for ci in children[k][idx]
-                        if not visited[k + 1][ci]]
-            if not kids:
-                break
-            # continue into the child nearest to where the pen is now;
-            # the rest become fresh chains (splits at narrow waists)
-            end = chain[-1]
-            kids.sort(key=lambda ci: (levels[k + 1][ci][0][0] - end[0]) ** 2
-                                   + (levels[k + 1][ci][0][1] - end[1]) ** 2)
-            for ci in kids[1:]:
-                seeds.append((k + 1, ci))
-            entry = end
-            k, idx = k + 1, kids[0]
-        if chain:
+    chains = []
+    for k0, lvl in enumerate(levels):
+        for i0 in range(len(lvl)):
+            if visited[k0][i0]:
+                continue
+            k, idx = k0, i0
+            chain = []
+            entry = levels[k][idx][0]
+            while True:
+                visited[k][idx] = True
+                ring = levels[k][idx]
+                s = min(range(len(ring)),
+                        key=lambda t: _dist(ring[t], entry))
+                walk_pts = ring[s:] + ring[:s + 1]
+                if chain and not region.segment_inside(chain[-1],
+                                                       walk_pts[0], 3):
+                    chains.append(chain)
+                    chain = []
+                chain.extend(walk_pts)
+                kids = [] if k + 1 >= len(levels) else [
+                    ci for ci in children[k][idx] if not visited[k + 1][ci]]
+                if not kids:
+                    break
+                entry = chain[-1]
+                idx = min(kids, key=lambda ci: _dist_to_loop(
+                    entry, levels[k + 1][ci]))
+                k += 1
             chains.append(chain)
-
     return chains
 
 
@@ -1072,10 +1073,9 @@ def archimedean_spiral_fill(df, spacing, edge_gap):
     if dmax <= edge_gap:
         return []
     region = df.region
-    r_need = 0.0
-    for corner in ((region.xmin, region.ymin), (region.xmax, region.ymin),
-                   (region.xmin, region.ymax), (region.xmax, region.ymax)):
-        r_need = max(r_need, _dist((cx, cy), corner))
+    r_need = max(_dist((cx, cy), corner) for corner in (
+        (region.xmin, region.ymin), (region.xmax, region.ymin),
+        (region.xmin, region.ymax), (region.xmax, region.ymax)))
 
     a = spacing / (2 * math.pi)
     ds = max(spacing / 2.0, 0.02)
@@ -1083,12 +1083,11 @@ def archimedean_spiral_fill(df, spacing, edge_gap):
     theta = 0.0
     r = 0.0
     while r <= r_need:
+        theta += ds / max(r, ds)       # constant arc-length steps
         r = a * theta
         pts.append((cx + r * math.cos(theta), cy + r * math.sin(theta)))
-        theta += ds / max(r, ds)
 
-    gap = edge_gap
-    return clip_polyline(pts, lambda x, y: df.sample(x, y) >= gap)
+    return clip_polyline(pts, lambda x, y: df.sample(x, y) >= edge_gap)
 
 
 def _hilbert_d2xy(order, d):
@@ -1113,49 +1112,37 @@ def _hilbert_d2xy(order, d):
     return x, y
 
 
-def hilbert_fill(df, spacing, edge_gap, max_points=600_000):
-    """Hilbert space-filling curve clipped to the eroded region."""
+def hilbert_fill(df, spacing, edge_gap, max_points=600_000, warnings=None):
+    """Hilbert space-filling curve clipped to the eroded region. Neighbouring
+    runs of the curve sit exactly `spacing` apart; the curve is centred on
+    the shape and grown until it covers it."""
     region = df.region
-    w = region.xmax - region.xmin
-    h = region.ymax - region.ymin
-    side = max(w, h)
+    side = max(region.xmax - region.xmin, region.ymax - region.ymin)
     if side <= 0 or spacing <= 0:
         return []
-    order = max(1, int(math.ceil(math.log(side / spacing, 2))))
+    order = max(1, int(math.ceil(math.log(side / spacing + 1, 2))))
+    step = spacing
     while (1 << (2 * order)) > max_points and order > 1:
         order -= 1
     n = 1 << order
-    step = side / (n - 1) if n > 1 else side
-    ox = region.xmin + (w - side) / 2.0
-    oy = region.ymin + (h - side) / 2.0
+    if (n - 1) * step < side:            # capped: stretch to cover the shape
+        step = side / (n - 1)
+        if warnings is not None:
+            warnings.append(
+                "Hilbert maze capped at {0}x{0} cells — lines are {1:.2f}x "
+                "further apart than asked".format(n, step / spacing))
+    ox = (region.xmin + region.xmax - (n - 1) * step) / 2.0
+    oy = (region.ymin + region.ymax - (n - 1) * step) / 2.0
 
     pts = []
     for d in range(n * n):
         hx, hy = _hilbert_d2xy(order, d)
         pts.append((ox + hx * step, oy + hy * step))
 
-    gap = edge_gap
-    return clip_polyline(pts, lambda x, y: df.sample(x, y) >= gap)
-
-
-def eroded_region(region, depth, cell_hint, max_cells=None):
-    """Region shrunk inward by `depth` (a true lateral inset, computed as
-    the distance-field iso-contour). Returns None when nothing is left,
-    or the original region if the field cannot be built."""
-    cell = max(min(cell_hint, depth * 0.9), 1e-3)
-    try:
-        df = DistanceField.build(region, cell, max_cells)
-    except ValueError:
-        return region
-    cells = _cells_crossing(df, [depth])[0]
-    loops = []
-    for loop in marching_squares(df, depth, cells):
-        loop = simplify_polyline(loop, df.cell * 0.3, closed=True)
-        if len(loop) >= 3:
-            loops.append(loop)
-    if not loops:
-        return None
-    return Region(loops, "evenodd")
+    runs = clip_polyline(pts, lambda x, y: df.sample(x, y) >= edge_gap)
+    # drop the in-between points of straight runs: same drawing, far
+    # smaller path data
+    return [simplify_polyline(run, step * 1e-3) for run in runs]
 
 
 # ----------------------------------------------------------------------
@@ -1177,6 +1164,7 @@ class _EndpointIndex:
     """Spatial hash over chain endpoints for nearest-neighbour queries."""
 
     def __init__(self, chains, bucket):
+        self.chains = chains
         self.bucket = max(bucket, EPS)
         self.grid = {}
         self.alive = [True] * len(chains)
@@ -1219,7 +1207,7 @@ class _EndpointIndex:
                             best = (idx, end, q)
             if radius > 40 and not found_any and best is None:
                 # sparse fallback: brute force the stragglers
-                for idx, ch in enumerate(self._chains_ref):
+                for idx, ch in enumerate(self.chains):
                     if not self.alive[idx]:
                         continue
                     for end in (0, 1):
@@ -1242,12 +1230,10 @@ def optimize_order(chains, join_tol=0.0):
     if len(chains) <= 1:
         return chains, before, before
 
-    diag = 0.0
     xs = [p[0] for c in chains for p in (c[0], c[-1])]
     ys = [p[1] for c in chains for p in (c[0], c[-1])]
     diag = math.hypot(max(xs) - min(xs), max(ys) - min(ys))
     index = _EndpointIndex(chains, diag / 48.0 if diag > 0 else 1.0)
-    index._chains_ref = chains
 
     # start from the chain whose endpoint is closest to the top-left
     start_corner = (min(xs), min(ys))
@@ -1436,32 +1422,26 @@ def fit_beziers(points, tol, closed=False):
 # Path-data emission
 # ----------------------------------------------------------------------
 
-def chains_to_path_d(chains, smooth=False, fit_tol=0.05, closed_flags=None):
+def chains_to_path_d(chains, smooth=False, fit_tol=0.05):
     """Serialize polyline chains to an SVG path `d` string.
 
     smooth=True re-fits each chain with cubic Beziers (Schneider) so the
     output is compact and silky; otherwise plain L polylines are emitted.
+    A chain that ends where it starts is written as a closed loop (Z).
     """
     parts = []
-    for ci, ch in enumerate(chains):
+    for ch in chains:
         if len(ch) < 2:
             continue
-        closed = bool(closed_flags[ci]) if closed_flags else False
-        pts = list(ch)
-        if closed and _dist(pts[0], pts[-1]) > EPS:
-            pts.append(pts[0])
-        elif not closed and len(pts) > 3 and _dist(pts[0], pts[-1]) <= EPS:
-            # chain physically returns to its start — treat as a loop so
-            # the Bezier fit wraps tangents smoothly across the seam
-            closed = True
-        parts.append("M {:.4f},{:.4f}".format(pts[0][0], pts[0][1]))
-        if smooth and len(pts) >= 3:
-            for _, P1, P2, P3 in fit_beziers(pts, fit_tol, closed=closed):
+        closed = len(ch) > 3 and _dist(ch[0], ch[-1]) <= EPS
+        parts.append("M {:.4f},{:.4f}".format(ch[0][0], ch[0][1]))
+        if smooth and len(ch) >= 3:
+            for _, P1, P2, P3 in fit_beziers(ch, fit_tol, closed=closed):
                 parts.append(
                     "C {:.4f},{:.4f} {:.4f},{:.4f} {:.4f},{:.4f}".format(
                         P1[0], P1[1], P2[0], P2[1], P3[0], P3[1]))
         else:
-            for x, y in pts[1:]:
+            for x, y in ch[1:]:
                 parts.append("L {:.4f},{:.4f}".format(x, y))
         if closed:
             parts.append("Z")
@@ -1475,57 +1455,72 @@ def chains_to_path_d(chains, smooth=False, fit_tol=0.05, closed_flags=None):
 MODES = ("hatch", "crosshatch", "sine", "concentric", "spiral",
          "archimedean", "hilbert")
 
-_DF_MODES = {"concentric", "spiral", "archimedean", "hilbert"}
+_HATCH_MODES = {"hatch", "crosshatch", "sine"}
 
 
 class FillResult:
-    def __init__(self, chains, closed_flags, smooth, warnings):
+    def __init__(self, chains, smooth, warnings):
         self.chains = chains              # list of point lists
-        self.closed_flags = closed_flags  # list of bool, same length
         self.smooth = smooth              # emit as fitted curves?
         self.warnings = warnings          # list of str
 
 
+def _closed(loops):
+    """Loops as chains that return to their start point."""
+    return [list(loop) + [loop[0]] for loop in loops]
+
+
 def generate_fill(region, mode, pen_width, spacing, angle=45.0,
                   cross_angle=90.0, sine_amplitude=1.5, sine_wavelength=6.0,
-                  edge_gap=None, connect=True, max_cells=None):
+                  edge_gap=None, connect=True, outline=False, max_cells=None):
     """Produce fill chains for `region`.
 
     pen_width / spacing / lengths are in user units. `edge_gap` defaults
     to pen_width / 2 so the ink stays inside the outline; pass 0 to run
-    the pen right up to (and onto) the boundary.
+    the pen right up to (and onto) the boundary. `outline=True` also
+    traces the shape's edge (at the same edge_gap) once.
     """
-    warnings = []
-    if region.is_empty():
-        return FillResult([], [], False, ["selection contains no closed area"])
+    if (region.is_empty() or region.xmax <= region.xmin
+            or region.ymax <= region.ymin):
+        return FillResult([], False, ["selection contains no closed area"])
+    if mode not in MODES:
+        raise ValueError("unknown fill mode: {!r}".format(mode))
     if edge_gap is None:
         edge_gap = pen_width * 0.5
+    too_small = FillResult([], False, [
+        "shape is too small for this pen size — nothing fits inside"])
+    warnings = []
+    edge = []                 # outline loops, drawn when outline=True
+    smooth = mode not in ("hatch", "crosshatch", "hilbert")
 
-    closed_flags = None
-    smooth = False
-
-    if mode in ("hatch", "crosshatch", "sine"):
+    if mode in _HATCH_MODES:
         # True lateral inset: hatch the region eroded by edge_gap, so ink
         # stays inside even where a line runs parallel to the boundary.
-        # Stroke ends then land ON the eroded outline and the round pen
+        # Stroke ends then land ON the inset outline and the round pen
         # tip just kisses the original edge.
-        work = region
+        work, bridge_ok = region, None
         if edge_gap > 0:
-            work = eroded_region(region, edge_gap, spacing / 2.0, max_cells)
+            df = DistanceField.build(
+                region, max(min(spacing / 2.0, edge_gap * 0.9), 1e-3),
+                max_cells)
+            work = df.inset(edge_gap)
             if work is None:
-                return FillResult([], [], False, [
-                    "shape is too small for this pen size — nothing fits "
-                    "inside"])
+                return too_small
+            # Joining bridges run between points ON the inset outline, so
+            # let them graze it by a hair (≤ 7.5% of the pen width) instead
+            # of rejecting every bridge that touches a wiggle of the contour.
+            floor = edge_gap * 0.85
+            bridge_ok = lambda a, b: df.segment_deeper(a, b, floor)  # noqa: E731
+        edge = work.rings
         if mode == "hatch":
-            chains = hatch_fill(work, spacing, angle, 0.0, connect)
+            chains = hatch_fill(work, spacing, angle, connect, bridge_ok)
         elif mode == "crosshatch":
             chains = cross_hatch_fill(work, spacing, angle, cross_angle,
-                                      0.0, connect)
+                                      connect, bridge_ok)
         else:
             chains = sine_fill(work, spacing, angle, sine_amplitude,
-                               sine_wavelength, 0.0, connect)
-            smooth = True
-    elif mode in _DF_MODES:
+                               sine_wavelength, connect, bridge_ok)
+    else:
         cell = max(min(spacing / 3.0, pen_width / 1.5), 1e-3)
         df = DistanceField.build(region, cell, max_cells)
         if df.coarsened:
@@ -1535,36 +1530,30 @@ def generate_fill(region, mode, pen_width, spacing, angle=45.0,
                 .format(df.cell))
         start = edge_gap if edge_gap > 0 else spacing * 0.5
         if df.max_value() <= start:
-            return FillResult([], [], False, [
-                "shape is too small for this pen size — nothing fits inside"])
-        if mode == "concentric":
+            return too_small
+        if mode in ("concentric", "spiral"):
             levels = concentric_rings(df, spacing, start,
                                       min_perimeter=pen_width * 2.0)
-            # bake the closure into the points so rings survive
-            # re-ordering / reversal in the optimizer intact
-            chains = [loop + [loop[0]] for lvl in levels for loop in lvl]
-            closed_flags = [True] * len(chains)
-            smooth = True
-        elif mode == "spiral":
-            levels = concentric_rings(df, spacing, start,
-                                      min_perimeter=pen_width * 2.0)
-            chains = link_rings_spiral(levels, region)
-            smooth = True
+            if mode == "concentric":
+                # bake the closure into the points so rings survive
+                # re-ordering / reversal in the optimizer intact
+                chains = _closed(loop for lvl in levels for loop in lvl)
+            else:
+                chains = link_rings_spiral(levels, region)
         elif mode == "archimedean":
             chains = archimedean_spiral_fill(df, spacing, start)
-            smooth = True
-        else:  # hilbert
-            chains = hilbert_fill(df, spacing, start)
-    else:
-        raise ValueError("unknown fill mode: {!r}".format(mode))
+        else:
+            chains = hilbert_fill(df, spacing, start, warnings=warnings)
+        # concentric/spiral with keep-inside: the first ring IS the outline
+        if outline and (mode in ("archimedean", "hilbert")
+                        or start != edge_gap):
+            inset = df.inset(edge_gap) if edge_gap > 0 else region
+            edge = inset.rings if inset else []
 
+    if outline:
+        chains = chains + _closed(e for e in edge if len(e) >= 3)
     chains = [c for c in chains if len(c) >= 2
               and polyline_length(c) > pen_width * 0.25]
-    if closed_flags is not None:
-        closed_flags = closed_flags[: len(chains)]
-    else:
-        closed_flags = [False] * len(chains)
-
     if not chains:
         warnings.append("no fill fits — try a smaller pen or tighter spacing")
-    return FillResult(chains, closed_flags, smooth, warnings)
+    return FillResult(chains, smooth, warnings)
