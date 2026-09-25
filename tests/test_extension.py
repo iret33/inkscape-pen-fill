@@ -28,14 +28,22 @@ FIXTURE = """<?xml version="1.0" encoding="UTF-8"?>
     </g>
     <rect id="box" x="20" y="85" width="48" height="38" rx="8"
           style="fill:#222222"/>
+    <g id="extras">
+      <rect id="hidden" x="100" y="85" width="30" height="30"
+            style="display:none;fill:#000000"/>
+      <image id="photo" x="140" y="85" width="30" height="30"
+             href="data:image/png;base64,iVBORw0KGgo="/>
+      <rect id="shown" x="100" y="120" width="30" height="20"
+            style="fill:#000000"/>
+    </g>
   </g>
 </svg>
 """
 
 
-def run_extension(tmp_path, args, ids=("donut",)):
+def run_extension(tmp_path, args, ids=("donut",), source=FIXTURE):
     src = tmp_path / "in.svg"
-    src.write_text(FIXTURE)
+    src.write_text(source)
     out = tmp_path / "out.svg"
     cmd = [sys.executable, os.path.join(ROOT, "pen_fill.py")]
     for i in ids:
@@ -77,11 +85,84 @@ def test_keep_original_false_removes_source(tmp_path):
     assert 'id="donut"' not in svg
 
 
-def test_group_false_emits_bare_path(tmp_path):
-    svg, _ = run_extension(
-        tmp_path, ["--fill_mode=hatch", "--group=false"])
-    assert "penfill" not in svg          # no labelled wrapper group
-    assert svg.count("<path") == 3       # two source paths + bare fill
+def test_fill_is_tagged_with_its_source(tmp_path):
+    svg, _ = run_extension(tmp_path, ["--fill_mode=hatch"])
+    assert re.search(r'label="penfill hatch donut"[^>]*'
+                     r'data-penfill-source="donut"', svg)
+
+
+def fill_labels(svg):
+    return re.findall(r'label="(penfill [^"]*)"', svg)
+
+
+def test_reapply_replaces_earlier_fill(tmp_path):
+    first, _ = run_extension(tmp_path, ["--fill_mode=hatch"])
+    second, _ = run_extension(tmp_path, ["--fill_mode=spiral"],
+                              source=first)
+    assert fill_labels(second) == ["penfill spiral donut"]
+
+
+def test_reapply_can_stack_fills(tmp_path):
+    first, _ = run_extension(tmp_path, ["--fill_mode=hatch"])
+    second, _ = run_extension(
+        tmp_path, ["--fill_mode=spiral", "--replace=false"], source=first)
+    assert sorted(fill_labels(second)) == ["penfill hatch donut",
+                                           "penfill spiral donut"]
+
+
+def test_v20_fill_is_replaced_too(tmp_path):
+    first, _ = run_extension(tmp_path, ["--fill_mode=hatch"])
+    legacy = first.replace('data-penfill-source="donut"', "")
+    second, _ = run_extension(tmp_path, ["--fill_mode=spiral"],
+                              source=legacy)
+    assert fill_labels(second) == ["penfill spiral donut"]
+
+
+def test_select_all_never_fills_fills(tmp_path):
+    first, _ = run_extension(tmp_path, ["--fill_mode=hatch"])
+    second, stderr = run_extension(tmp_path, ["--fill_mode=hatch"],
+                                   ids=("layer1",), source=first)
+    assert "<?>" not in stderr and "too small" not in stderr
+    assert sorted(fill_labels(second)) == [
+        "penfill hatch blob", "penfill hatch box", "penfill hatch donut",
+        "penfill hatch shown"]
+
+
+def test_hidden_objects_and_images_are_skipped(tmp_path):
+    svg, _ = run_extension(tmp_path, ["--fill_mode=hatch"],
+                           ids=("extras",))
+    assert fill_labels(svg) == ["penfill hatch shown"]
+
+
+def test_object_selected_twice_is_filled_once(tmp_path):
+    svg, _ = run_extension(tmp_path, ["--fill_mode=hatch"],
+                           ids=("extras", "shown"))
+    assert fill_labels(svg) == ["penfill hatch shown"]
+
+
+def test_outline_option_adds_a_loop(tmp_path):
+    def loops(extra):
+        svg, _ = run_extension(
+            tmp_path, ["--fill_mode=hatch", "--pen_size=1.0"] + extra)
+        m = re.search(r'label="penfill[^"]*"[^>]*>\s*<path[^>]*d="([^"]+)"',
+                      svg)
+        return m.group(1).count("Z")
+    # the donut's outline is two closed loops: outer edge + hole edge
+    assert loops(["--outline=true"]) == loops([]) + 2
+
+
+def test_inx_matches_arguments():
+    import argparse
+    import xml.etree.ElementTree as ET
+    sys.path.insert(0, ROOT)
+    import pen_fill
+    ns = "{http://www.inkscape.org/namespace/inkscape/extension}"
+    tree = ET.parse(os.path.join(ROOT, "pen_fill.inx"))
+    params = {p.get("name") for p in tree.iter(ns + "param")}
+    parser = argparse.ArgumentParser()
+    pen_fill.PenFill.add_arguments(None, parser)
+    args = {a.dest for a in parser._actions if a.dest != "help"}
+    assert params == args
 
 
 def test_color_from_shape(tmp_path):
